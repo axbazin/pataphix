@@ -226,9 +226,9 @@ def process_stderr_log(stderr_output: IO[str] | None, outdir: Path):
         if "overall alignment rate" in line:
             perc_reads = line.split()[0].strip()
             logging.info(f"Overall alignment rate: {perc_reads}")
-        if "aligned exactly 1 time" in line:
+        if "exactly 1 time" in line:
             nb_reads += int(line.strip().split()[0])
-        if "aligned >1 times" in line:
+        if ">1 times" in line:
             nb_reads += int(line.strip().split()[0])
     logging.info(f"Number of reads aligned to PhiX: {nb_reads}")
     # write the stderr output to a file
@@ -266,7 +266,7 @@ def main():
     mapping_process.wait()
     # process the stderr output of the mapping process
     process_stderr_log(mapping_process.stderr, outdir=args.outdir)
-    print("STDERR:", mapping_process.stderr)
+    tmpdir.cleanup()
 
 
 if __name__ == "__main__":
