@@ -316,7 +316,7 @@ def cmd_line():
         "--filter",
         required=False,
         action="store_true",
-        help="Filter the reads based on PhiX content. If set, reads that do not map to PhiX will be written to the output directory in a file named similarly.",
+        help="Filter the reads based on PhiX content. If set, reads that do not map to PhiX will be written to the output directory in a file named similarly as the input file(s).",
     )
     parser.add_argument(
         "--keep-alignments",
@@ -394,6 +394,38 @@ def process_stderr_log(stderr_output: IO[str], outdir: Path):
     fout.close()
 
 
+def write_results(results: dict, outdir: Path):
+    """
+    Write the results of the mapping process to a file in the output directory.
+    """
+    outdir.mkdir(parents=True, exist_ok=True)
+    with open(outdir / "phix_metrics.tsv", "w") as fout:
+        fout.write("metric\tvalue\n")
+        for key, value in results.items():
+            if not isinstance(value, dict):
+                fout.write(f"{key}\t{value}\n")
+                logging.debug(f"{key}: {value}")
+    logging.info(f"Resulting metrics written to {outdir / 'phix_metrics.tsv'}")
+    with open(outdir / "phix_error_estimates.tsv", "w") as fout:
+        fout.write("read\tposition\terror_rate\terrors\tcoverage\n")
+        for pos, metrics in results.get("R1_position_error_rates", {}).items():
+            fout.write(
+                f"R1\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['reads']}\n"
+            )
+            logging.debug(
+                f"R1\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['reads']}"
+            )
+        if "R2_position_error_rates" in results:
+            for pos, metrics in results["R2_position_error_rates"].items():
+                fout.write(
+                    f"R2\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['reads']}\n"
+                )
+                logging.debug(
+                    f"R2\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['reads']}"
+                )
+    logging.info(f"Error estimates written to {outdir / 'phix_error_estimates.tsv'}")
+
+
 def main():
     args = cmd_line()
     tmpdir = TemporaryDirectory(dir=args.tmpdir)
@@ -423,13 +455,8 @@ def main():
             outdir=args.outdir,
             keep=args.keep_alignments,
         )
-        for key, value in results.items():
-            if isinstance(value, dict):
-                logging.info(f"{key}:")
-                for subkey, subvalue in value.items():
-                    logging.info(f"  {subkey}: {subvalue}")
-            else:
-                logging.info(f"{key}: {value}")
+
+        write_results(results, args.outdir)
         logging.info("Mapping results processed successfully.")
     mapping_process.wait()
     # process the stderr output of the mapping process
