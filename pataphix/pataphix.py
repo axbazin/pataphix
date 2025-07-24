@@ -14,6 +14,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
 from typing import List, IO
 import os
+from collections import defaultdict
 
 # third-party libraries
 import pysam
@@ -71,6 +72,7 @@ def map_reads(
         filter_option = "--un-conc-gz" if R2 else "--un-gz"
         filter_path = os.path.basename(R1).replace(".fastq", "_phix_filtered.fastq")
         if R2 is not None:
+            # This should be improved for cases where '_R1_' is not in the filename
             filter_path = (
                 os.path.basename(R1).split("_R1_")[0] + "_phix_filtered.fastq.gz"
             )
@@ -101,6 +103,35 @@ def map_reads(
     return mapping_process
 
 
+def compute_position_error_rates(
+    position_errors: defaultdict[int, int],
+    position_coverage: defaultdict[int, int],
+) -> dict[int, dict[str, float]]:
+    """
+    Calculate position-wise error rates based on the number of errors and coverage.
+    This function assumes that position_errors and position_coverage are defaultdicts
+    where keys are positions and values are counts of errors or coverage.
+    """
+    if not position_errors or not position_coverage:
+        logging.warning("No position errors or coverage data available.")
+        return {}
+    # Calculate position-wise error rates
+    position_error_rates = {}
+
+    max_position: int = max(position_coverage.keys()) if position_coverage else 0
+
+    for pos in range(max_position + 1):
+        # R1 error rates
+        if position_coverage[pos] > 0:
+            r1_error_rate = position_errors[pos] / position_coverage[pos]
+            position_error_rates[pos] = {
+                "error_rate": r1_error_rate,
+                "errors": position_errors[pos],
+                "reads": position_coverage[pos],
+            }
+    return position_error_rates
+
+
 def deal_with_mapping(process_output: IO[str], outdir: Path, keep: bool = False):
     """
     Process the output of the bowtie2 mapping.
@@ -109,19 +140,142 @@ def deal_with_mapping(process_output: IO[str], outdir: Path, keep: bool = False)
     # process_output is the stdout of the bowtie2 process
     # then wait for the process to finish and save the SAM file
     bam_file = outdir / "mapped_phix.bam"
+
+    # Track mismatches and coverage per read position
+    position_mismatches = defaultdict(int)  # position -> mismatch count
+    position_coverage = defaultdict(int)  # position -> total bases count
+
+    # Separate tracking for paired-end reads if requested
+    r1_position_errors = defaultdict(int)
+    r1_position_coverage = defaultdict(int)
+    r2_position_errors = defaultdict(int)
+    r2_position_coverage = defaultdict(int)
+
+    total_mismatches = 0
+    total_errors = 0
+    total_reads = 0
+    total_aligned_bases = 0
+    paired_reads = 0
+    single_reads = 0
+
+    # Open reference if provided for more accurate base calling
+    ref_fasta = pysam.FastaFile(
+        os.path.dirname(os.path.realpath(__file__)) + "/data/phix.fasta"
+    )
+
     instream = pysam.AlignmentFile(process_output, "r")
     if keep:
         bamfout = pysam.AlignmentFile(bam_file, "wb", template=instream)
-    for line in instream:
+    for read in instream:
         # do stuff with the reads
         if keep:
-            bamfout.write(line)
+            bamfout.write(read)
+        if read.is_unmapped or read.is_secondary or read.is_supplementary:
+            continue
+
+        total_reads += 1
+        read_mismatches = 0
+
+        # Determine if this is a paired read and which mate
+        is_paired = read.is_paired
+
+        if is_paired and not read.mate_is_unmapped:
+            paired_reads += 1
+        else:
+            single_reads += 1
+
+        # Get aligned pairs: (query_pos, ref_pos, ref_base)
+        aligned_pairs = read.get_aligned_pairs(with_seq=True)
+
+        for query_pos, ref_pos, ref_base in aligned_pairs:
+            is_error = False
+            # Skip insertions (query_pos exists, ref_pos is None)
+            # Skip deletions (query_pos is None, ref_pos exists)
+            if query_pos is None or ref_pos is None:
+                is_error = True
+                total_errors += 1
+            else:
+                # Determine reference base
+                if ref_fasta and ref_pos is not None:
+                    # Get reference base from FASTA (most accurate)
+                    ref_base = ref_fasta.fetch(
+                        read.reference_name, ref_pos, ref_pos + 1
+                    ).upper()
+                elif ref_base:
+                    # Use ref_base from aligned_pairs
+                    ref_base = ref_base.upper()
+                else:
+                    # Skip if we can't determine reference base
+                    print("can't determine reference base for read", read.query_name)
+                    continue
+
+                query_base = read.query_sequence[query_pos].upper()
+
+                # Check for mismatch
+                if query_base != ref_base:
+                    position_mismatches[query_pos] += 1
+                    read_mismatches += 1
+                    total_mismatches += 1
+                    total_errors += 1
+                    is_error = True
+            if query_pos is not None:
+                position_coverage[query_pos] += 1
+                total_aligned_bases += 1
+                if read.is_read1 or not read.is_paired:
+                    r1_position_coverage[query_pos] += 1
+                elif read.is_read2:
+                    r2_position_coverage[query_pos] += 1
+
+            if is_error:
+                # Track errors for paired-end analysis
+                if read.is_read1 or not read.is_paired:
+                    r1_position_errors[query_pos] += 1
+                elif read.is_read2:
+                    r2_position_errors[query_pos] += 1
+    ref_fasta.close()
+
     if keep:
         bamfout.close()
         logging.info(f"Mapping results saved to {bam_file}")
     else:
         logging.info("Mapping completed. Results not saved as SAM file.")
     instream.close()
+
+    # Calculate position-wise error rates
+    r1_position_error_rates = compute_position_error_rates(
+        r1_position_errors, r1_position_coverage
+    )
+
+    # Calculate overall error rate
+    overall_error_rate = (
+        total_errors / total_aligned_bases if total_aligned_bases > 0 else 0
+    )
+
+    results = {
+        "total_mismatches": total_mismatches,
+        "total_errors": total_errors,
+        "total_aligned_bases": total_aligned_bases,
+        "total_reads": total_reads,
+        "paired_reads": paired_reads,
+        "single_reads": single_reads,
+        "overall_error_rate": overall_error_rate,
+        "is_paired_data": paired_reads > 0,
+        "R1_position_error_rates": r1_position_error_rates,
+        "R1_error_rate": (
+            sum(r1_position_errors.values()) / sum(r1_position_coverage.values())
+        ),
+    }
+    # Add paired-end specific results if requested and data exists
+    if len(r2_position_coverage) != 0:
+        r2_position_error_rates = compute_position_error_rates(
+            r2_position_errors, r2_position_coverage
+        )
+        results["R2_position_error_rates"] = r2_position_error_rates
+        results["R2_error_rate"] = sum(r2_position_errors.values()) / sum(
+            r2_position_coverage.values()
+        )
+
+    return results
 
 
 def cmd_line():
@@ -162,13 +316,13 @@ def cmd_line():
         "--filter",
         required=False,
         action="store_true",
-        help="Filter the reads based on PhiX content. If set, reads that do not map to PhiX will written to the output directory in a file named similarly.",
+        help="Filter the reads based on PhiX content. If set, reads that do not map to PhiX will be written to the output directory in a file named similarly.",
     )
     parser.add_argument(
         "--keep-alignments",
         required=False,
         action="store_true",
-        help="Keep the alignments in SAM format after mapping.",
+        help="Keep the alignments on the PhiX genome in SAM format after mapping.",
     )
     parser.add_argument(
         "--loglevel",
@@ -214,7 +368,7 @@ def setup_logging(loglevel: str = "INFO"):
     logging.info("pataphix version: %s", distribution("pataphix").version)
 
 
-def process_stderr_log(stderr_output: IO[str] | None, outdir: Path):
+def process_stderr_log(stderr_output: IO[str], outdir: Path):
     """
     Process the stderr output of the mapping process.
     This function can be extended to handle specific error messages or warnings.
@@ -247,6 +401,10 @@ def main():
     is_bowtie2_installed()
     index = index_fasta(tmpdir=tmpdir)
 
+    # prepare the output directory
+    args.outdir.mkdir(parents=True, exist_ok=False)
+
+    # Launch the mapping process
     mapping_process = map_reads(
         R1=args.R1,
         R2=args.R2,
@@ -255,14 +413,24 @@ def main():
         outdir=args.outdir,
         filter=args.filter,
     )
-
+    if mapping_process.stdout is None:
+        raise Exception("Mapping process did not produce any output.")
     if not args.only_estimates:
         logging.info("Processing mapping results...")
-        deal_with_mapping(
+        # Process the stdout output of the mapping process
+        results = deal_with_mapping(
             process_output=mapping_process.stdout,
             outdir=args.outdir,
             keep=args.keep_alignments,
         )
+        for key, value in results.items():
+            if isinstance(value, dict):
+                logging.info(f"{key}:")
+                for subkey, subvalue in value.items():
+                    logging.info(f"  {subkey}: {subvalue}")
+            else:
+                logging.info(f"{key}: {value}")
+        logging.info("Mapping results processed successfully.")
     mapping_process.wait()
     # process the stderr output of the mapping process
     process_stderr_log(mapping_process.stderr, outdir=args.outdir)
