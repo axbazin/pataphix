@@ -380,11 +380,11 @@ def process_stderr_log(stderr_output: IO[str], outdir: Path):
         if "overall alignment rate" in line:
             perc_reads = line.split()[0].strip()
             logging.info(f"Overall alignment rate: {perc_reads}")
-        if "exactly 1 time" in line:
+        if "1 time" in line:
             nb_reads += int(line.strip().split()[0])
         if ">1 times" in line:
             nb_reads += int(line.strip().split()[0])
-    logging.info(f"Number of reads aligned to PhiX: {nb_reads}")
+    logging.info(f"Number of reads (or pairs of reads) aligned to PhiX: {nb_reads}")
     # write the stderr output to a file
     outdir.mkdir(parents=True, exist_ok=True)
     open(outdir / "mapping_stderr.log", "w").write(all_log)
