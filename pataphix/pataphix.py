@@ -12,12 +12,14 @@ import logging
 from importlib.metadata import distribution
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
-from typing import List, IO
+from typing import List, IO, Tuple
 import os
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 # third-party libraries
 import pysam
+
+REFERENCE_FASTA = Path(os.path.dirname(os.path.realpath(__file__)) + "/data/phix.fasta")
 
 
 def is_bowtie2_installed():
@@ -37,28 +39,49 @@ def index_fasta(tmpdir: TemporaryDirectory[str]) -> str:
     """
     Generate the bowtie2 index of the PhiX fasta file included in the code for mapping.
     """
-    fasta = Path(os.path.dirname(os.path.realpath(__file__)) + "/data/phix.fasta")
     bowtie2_cmd: List[str] = [
         "bowtie2-build",
-        str(fasta),
+        str(REFERENCE_FASTA),
         tmpdir.name + "/PhiX",
     ]
     logging.debug(f"Launching: {' '.join(bowtie2_cmd)}")
     subprocess.run(bowtie2_cmd, capture_output=True)
-    logging.debug(f"Done indexing PhiX fasta file: {fasta}")
+    logging.debug(f"Done indexing PhiX fasta file: {REFERENCE_FASTA}")
     logging.debug(f"Index files are in: {tmpdir.name}")
     logging.debug(f"Index files are: {os.listdir(tmpdir.name)}")
     return tmpdir.name + "/PhiX"
+
+
+def read_fasta(fasta_file: Path) -> str:
+    """
+    Read the FASTA file and return the sequence as a string.
+    This function assumes that the FASTA file is well-formed and contains a single sequence.
+    """
+    sequence = ""
+    with open(fasta_file, "r") as f:
+        for line in f:
+            if not line.startswith(">"):
+                sequence += line.strip()
+    return sequence
+
+
+def get_fasta_length(fasta_file: Path) -> int:
+    """
+    Get the length of the FASTA file.
+    This function assumes that the FASTA file is well-formed and contains a single sequence.
+    """
+    return len(read_fasta(fasta_file))
 
 
 def map_reads(
     R1: Path,
     R2: Path | None,
     index: str,
+    sam_output: str,
     threads: int,
     outdir: Path,
     filter: bool = False,
-) -> subprocess.Popen[str]:
+) -> subprocess.CompletedProcess[str]:
     """
     Map the reads from the FASTQ files to the PhiX index using bowtie2.
     """
@@ -92,13 +115,14 @@ def map_reads(
     else:
         bowtie2_cmd.extend(["-U", str(R1)])
 
+    bowtie2_cmd.extend(["-S", sam_output])
+
     logging.debug(f"Launching: {' '.join(bowtie2_cmd)}")
-    mapping_process = subprocess.Popen(
+    mapping_process = subprocess.run(
         bowtie2_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        bufsize=1,
-        universal_newlines=True,
+        check=True,
+        capture_output=True,
+        text=True,
     )
     return mapping_process
 
@@ -132,150 +156,55 @@ def compute_position_error_rates(
     return position_error_rates
 
 
-def deal_with_mapping(process_output: IO[str], outdir: Path, keep: bool = False):
+def process_mapping(
+    alignment_file: str,
+) -> Tuple[dict[int, Counter], dict[int, Counter]]:
     """
     Process the output of the bowtie2 mapping.
     If keep is True, the SAM file will be read; otherwise, the process output will be read.
     """
-    # process_output is the stdout of the bowtie2 process
-    # then wait for the process to finish and save the SAM file
-    bam_file = outdir / "mapped_phix.bam"
+    SNV_dict = defaultdict(Counter)
+    insertion_dict = defaultdict(Counter)
 
-    # Track mismatches and coverage per read position
-    position_mismatches = defaultdict(int)  # position -> mismatch count
-    position_coverage = defaultdict(int)  # position -> total bases count
-
-    # Separate tracking for paired-end reads if requested
-    r1_position_errors = defaultdict(int)
-    r1_position_coverage = defaultdict(int)
-    r2_position_errors = defaultdict(int)
-    r2_position_coverage = defaultdict(int)
-
-    total_mismatches = 0
-    total_errors = 0
-    total_reads = 0
-    total_aligned_bases = 0
-    paired_reads = 0
-    single_reads = 0
-
-    # Open reference if provided for more accurate base calling
-    ref_fasta = pysam.FastaFile(
-        os.path.dirname(os.path.realpath(__file__)) + "/data/phix.fasta"
-    )
-
-    instream = pysam.AlignmentFile(process_output, "r")
-    if keep:
-        bamfout = pysam.AlignmentFile(bam_file, "wb", template=instream)
+    instream = pysam.AlignmentFile(alignment_file, "r")
     for read in instream:
+        init_insertion = False
+        insertion_sequence = ""
+        prev_ref_pos = None  # To track the previous reference position for insertions
         # do stuff with the reads
-        if keep:
-            bamfout.write(read)
         if read.is_unmapped or read.is_secondary or read.is_supplementary:
             continue
 
-        total_reads += 1
-        read_mismatches = 0
-
-        # Determine if this is a paired read and which mate
-        is_paired = read.is_paired
-
-        if is_paired and not read.mate_is_unmapped:
-            paired_reads += 1
-        else:
-            single_reads += 1
-
         # Get aligned pairs: (query_pos, ref_pos, ref_base)
-        aligned_pairs = read.get_aligned_pairs(with_seq=True)
+        aligned_pairs = read.get_aligned_pairs()
+        for i, (query_pos, ref_pos) in enumerate(aligned_pairs):
+            if query_pos is not None and ref_pos is not None:
+                SNV_dict[ref_pos][
+                    read.query_sequence[query_pos].upper()
+                ] += 1  # Count the base at this position
 
-        for query_pos, ref_pos, ref_base in aligned_pairs:
-            is_error = False
-            # Skip insertions (query_pos exists, ref_pos is None)
-            # Skip deletions (query_pos is None, ref_pos exists)
-            if query_pos is None or ref_pos is None:
-                is_error = True
-                total_errors += 1
-            else:
-                # Determine reference base
-                if ref_fasta and ref_pos is not None:
-                    # Get reference base from FASTA (most accurate)
-                    ref_base = ref_fasta.fetch(
-                        read.reference_name, ref_pos, ref_pos + 1
-                    ).upper()
-                elif ref_base:
-                    # Use ref_base from aligned_pairs
-                    ref_base = ref_base.upper()
+            elif query_pos is None and ref_pos is not None:
+                # This is a deletion in the query sequence
+                SNV_dict[ref_pos]["-"] += 1
+            elif query_pos is not None and ref_pos is None:
+                # find the previous ref_pos
+                # This is an insertion in the query sequence
+                if init_insertion:
+                    insertion_sequence += read.query_sequence[query_pos]
                 else:
-                    # Skip if we can't determine reference base
-                    print("can't determine reference base for read", read.query_name)
-                    continue
+                    init_insertion = True
+                    insertion_sequence = read.query_sequence[query_pos]
 
-                query_base = read.query_sequence[query_pos].upper()
+            if ref_pos is not None:
+                if insertion_sequence != "":
+                    # reading the insertion is over
+                    insertion_dict[prev_ref_pos][insertion_sequence] += 1
+                    init_insertion = False
+                    insertion_sequence = ""
+                prev_ref_pos = ref_pos
 
-                # Check for mismatch
-                if query_base != ref_base:
-                    position_mismatches[query_pos] += 1
-                    read_mismatches += 1
-                    total_mismatches += 1
-                    total_errors += 1
-                    is_error = True
-            if query_pos is not None:
-                position_coverage[query_pos] += 1
-                total_aligned_bases += 1
-                if read.is_read1 or not read.is_paired:
-                    r1_position_coverage[query_pos] += 1
-                elif read.is_read2:
-                    r2_position_coverage[query_pos] += 1
-
-            if is_error:
-                # Track errors for paired-end analysis
-                if read.is_read1 or not read.is_paired:
-                    r1_position_errors[query_pos] += 1
-                elif read.is_read2:
-                    r2_position_errors[query_pos] += 1
-    ref_fasta.close()
-
-    if keep:
-        bamfout.close()
-        logging.info(f"Mapping results saved to {bam_file}")
-    else:
-        logging.info("Mapping completed. Results not saved as SAM file.")
     instream.close()
-
-    # Calculate position-wise error rates
-    r1_position_error_rates = compute_position_error_rates(
-        r1_position_errors, r1_position_coverage
-    )
-
-    # Calculate overall error rate
-    overall_error_rate = (
-        total_errors / total_aligned_bases if total_aligned_bases > 0 else 0
-    )
-
-    results = {
-        "total_mismatches": total_mismatches,
-        "total_errors": total_errors,
-        "total_aligned_bases": total_aligned_bases,
-        "total_reads": total_reads,
-        "paired_reads": paired_reads,
-        "single_reads": single_reads,
-        "overall_error_rate": overall_error_rate,
-        "is_paired_data": paired_reads > 0,
-        "R1_position_error_rates": r1_position_error_rates,
-        "R1_error_rate": (
-            sum(r1_position_errors.values()) / sum(r1_position_coverage.values())
-        ),
-    }
-    # Add paired-end specific results if requested and data exists
-    if len(r2_position_coverage) != 0:
-        r2_position_error_rates = compute_position_error_rates(
-            r2_position_errors, r2_position_coverage
-        )
-        results["R2_position_error_rates"] = r2_position_error_rates
-        results["R2_error_rate"] = sum(r2_position_errors.values()) / sum(
-            r2_position_coverage.values()
-        )
-
-    return results
+    return SNV_dict, insertion_dict
 
 
 def cmd_line():
@@ -337,7 +266,14 @@ def cmd_line():
         required=False,
         default=1,
         type=int,
-        help="Number of threads to use for the mapping process. ",
+        help="Number of threads to use for the mapping process.",
+    )
+    parser.add_argument(
+        "--skip",
+        required=False,
+        type=int,
+        default=10,
+        help="Skip the first and last N bases in the reference. Mapping at the end of contigs can be problematic, so this option allows to skip the first and last N bases in the reference.",
     )
     parser.add_argument(
         "--version",
@@ -426,6 +362,87 @@ def write_results(results: dict, outdir: Path):
     logging.info(f"Error estimates written to {outdir / 'phix_error_estimates.tsv'}")
 
 
+def generate_consensus(
+    SNV: defaultdict[int, Counter],
+    insertion: defaultdict[int, Counter],
+) -> Tuple[list, dict]:
+    """
+    Generates what would be the 'original' consensus sequence based on the SNV and insertion dictionaries.
+    This is a very basic consensus generation that simply takes the most common base at each position.
+    It does not take into account the quality of the bases or any other factors.
+    It will also give out positions of expected insertions if any.
+    """
+    consensus = list()
+    for char in read_fasta(REFERENCE_FASTA):
+        consensus.append(char)  # init consensus with empty strings
+    insertion_consensus = {}
+
+    for pos, counts in SNV.items():
+        # Get the most common base at this position
+        most_common_base, _ = counts.most_common(1)[0]
+        if most_common_base != consensus[pos]:
+            logging.warning(
+                f"High SNV frequency at position {pos}: '{most_common_base}' ({counts[most_common_base]}/{SNV[pos].total()} observations). Using '{most_common_base}' as consensus base instead of '{consensus[pos]}'."
+            )
+            consensus[pos] = most_common_base
+
+    for pos, ins_counts in insertion.items():
+        # Get the most common insertion sequence at this position
+        most_common_ins, most_common_count = ins_counts.most_common(1)[0]
+        pos_cov = SNV[pos].total()
+        if most_common_count > pos_cov * 0.80:
+            logging.warning(
+                f"High insertion frequency at position {pos}: '{most_common_ins}' ({most_common_count} times, coverage {pos_cov})"
+            )
+            insertion_consensus[pos] = most_common_ins
+
+    return consensus, insertion_consensus
+
+
+def compute_error_rates(
+    alignment_file: str,
+    consensus: list,
+    insertion: dict,
+) -> dict:
+    """
+    Compute the error rates based on the alignment file and the consensus sequence.
+    This function calculates the position-wise error rates for both R1 and R2 reads.
+    """
+    position_errors = defaultdict(int)
+    position_coverage = defaultdict(int)
+
+    instream = pysam.AlignmentFile(alignment_file, "r")
+    for read in instream:
+        if read.is_unmapped or read.is_secondary or read.is_supplementary:
+            continue
+
+        aligned_pairs = read.get_aligned_pairs()
+        for query_pos, ref_pos in aligned_pairs:
+            if ref_pos is not None:
+                position_coverage[query_pos] += 1
+                if query_pos is not None:
+                    if read.query_sequence[query_pos] != consensus[ref_pos]:
+                        position_errors[query_pos] += 1
+            else:
+                # this is an insertion in the query sequence
+                position_coverage[query_pos] += 1
+                if read.query_sequence[query_pos] != "-":
+                    position_errors[query_pos] += 1
+
+    instream.close()
+
+    # Calculate position-wise error rates
+    position_error_rates = compute_position_error_rates(
+        position_errors, position_coverage
+    )
+
+    return {
+        "R1_position_error_rates": position_error_rates,
+        "consensus": consensus,
+        "insertion_consensus": insertion,
+    }
+
+
 def main():
     args = cmd_line()
     tmpdir = TemporaryDirectory(dir=args.tmpdir)
@@ -434,33 +451,65 @@ def main():
     index = index_fasta(tmpdir=tmpdir)
 
     # prepare the output directory
-    args.outdir.mkdir(parents=True, exist_ok=False)
-
+    args.outdir.mkdir(parents=True, exist_ok=True)
+    if args.only_estimates:
+        sam_output = "/dev/null"
+    else:
+        # write it in the tmpdir
+        sam_output = str(tmpdir.name + "/mapped_phix.sam")
     # Launch the mapping process
-    mapping_process = map_reads(
+    logging.info("Starting the mapping process...")
+    mapping_results = map_reads(
         R1=args.R1,
         R2=args.R2,
+        sam_output=sam_output,
         index=index,
         threads=args.threads,
         outdir=args.outdir,
         filter=args.filter,
     )
-    if mapping_process.stdout is None:
+    logging.info("Mapping process completed.")
+    if mapping_results.stdout is None:
         raise Exception("Mapping process did not produce any output.")
     if not args.only_estimates:
-        logging.info("Processing mapping results...")
-        # Process the stdout output of the mapping process
-        results = deal_with_mapping(
-            process_output=mapping_process.stdout,
-            outdir=args.outdir,
-            keep=args.keep_alignments,
-        )
+        logging.info("Sorting and indexing the mapping results...")
+        if args.keep_alignments:
+            alignment_file = str(args.outdir / "mapped_phix_sorted.bam")
+            pysam.sort(
+                "--write-index",
+                "--threads",
+                str(args.threads),
+                "-o",
+                str(alignment_file),
+                str(sam_output),
+            )
+        else:
+            alignment_file = sam_output
 
+        logging.info("Mapping results sorted and indexed.")
+        logging.info("Processing the mapping results...")
+        # Now deal with the mapping results
+        SNV_dict, INS_dict = process_mapping(
+            alignment_file=alignment_file,
+        )
+        logging.info("Mapping results processed. Generating consensus sequence...")
+        consensus, insertion_consensus = generate_consensus(
+            SNV=SNV_dict,
+            insertion=INS_dict,
+        )
+        logging.info("Consensus sequence generated.")
+        logging.info("Calculating read position error rates...")
+        exit(1)
+        results = compute_error_rates(
+            alignment_file=alignment_file,
+            consensus=consensus,
+            insertion=insertion_consensus,
+        )
         write_results(results, args.outdir)
         logging.info("Mapping results processed successfully.")
     mapping_process.wait()
     # process the stderr output of the mapping process
-    process_stderr_log(mapping_process.stderr, outdir=args.outdir)
+    process_stderr_log(mapping_results.stderr, outdir=args.outdir)
     tmpdir.cleanup()
 
 
