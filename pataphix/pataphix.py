@@ -155,7 +155,7 @@ def compute_position_error_rates(
                 "errors": position_errors[pos],
                 "avg_qc_errors": qc_errors[pos] / position_errors[pos],
                 "avg_qc": qc_coverage[pos] / position_coverage[pos],
-                "reads": position_coverage[pos],
+                "position_coverage": position_coverage[pos],
             }
     return position_error_rates
 
@@ -349,18 +349,18 @@ def write_results(results: dict, outdir: Path):
         )
         for pos, metrics in results.get("R1_position_error_rates", {}).items():
             fout.write(
-                f"R1\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']}\t{metrics['avg_qc']}\t{metrics['reads']}\n"
+                f"R1\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']:.6f}\t{metrics['avg_qc']:.6f}\t{metrics['reads']}\n"
             )
             logging.debug(
-                f"R1\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']}\t{metrics['avg_qc']}\t{metrics['reads']}"
+                f"R1\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']:.6f}\t{metrics['avg_qc']:.6f}\t{metrics['reads']}"
             )
         if "R2_position_error_rates" in results:
             for pos, metrics in results["R2_position_error_rates"].items():
                 fout.write(
-                    f"R2\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']}\t{metrics['avg_qc']}\t{metrics['reads']}\n"
+                    f"R2\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']:.6f}\t{metrics['avg_qc']:.6f}\t{metrics['reads']}\n"
                 )
                 logging.debug(
-                    f"R2\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']}\t{metrics['avg_qc']}\t{metrics['reads']}"
+                    f"R2\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']:.6f}\t{metrics['avg_qc']:.6f}\t{metrics['reads']}"
                 )
     logging.info(f"Error estimates written to {outdir / 'phix_error_estimates.tsv'}")
 
@@ -406,7 +406,8 @@ def compute_error_rates(
     alignment_file: str,
     consensus: list,
     insertion: dict,
-    skip: int = 10,
+    skip: int,
+    has_R2: bool,
 ) -> dict:
     """
     Compute the error rates based on the alignment file and the consensus sequence.
@@ -432,7 +433,7 @@ def compute_error_rates(
             nb_paired_reads += 1
         else:
             nb_single_reads += 1
-        read_type = "R1" if read.is_read1 else "R2"
+        read_type = "R1" if read.is_read1 or not has_R2 else "R2"
         init_insertion = False
         insertion_sequence = ""
         prev_ref_pos = None  # To track the previous reference position for insertions
@@ -460,10 +461,10 @@ def compute_error_rates(
                     position_coverage[read_type][prev_query_pos] += 1
                     position_errors[read_type][prev_query_pos] += 1
                     nb_indels += 1
-                    qc_coverage[read_type][prev_query_pos] += read.query_qualities[
+                    qc_errors[read_type][prev_query_pos] += read.query_qualities[
                         prev_query_pos
                     ]
-                    qc_errors[read_type][prev_query_pos] += read.query_qualities[
+                    qc_coverage[read_type][prev_query_pos] += read.query_qualities[
                         prev_query_pos
                     ]
             elif query_pos is not None and ref_pos is None:
@@ -600,6 +601,8 @@ def main():
             alignment_file=alignment_file,
             consensus=consensus,
             insertion=insertion_consensus,
+            skip=args.skip,
+            has_R2=args.R2 is not None,
         )
         write_results(results, args.outdir)
         logging.info("Mapping results processed successfully.")
