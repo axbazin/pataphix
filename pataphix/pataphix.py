@@ -55,7 +55,7 @@ def index_fasta(tmpdir: TemporaryDirectory[str]) -> str:
 def read_fasta(fasta_file: Path) -> str:
     """
     Read the FASTA file and return the sequence as a string.
-    This function assumes that the FASTA file is well-formed and contains a single sequence.
+    This function assumes that the FASTA file contains a single sequence.
     """
     sequence = ""
     with open(fasta_file, "r") as f:
@@ -68,7 +68,7 @@ def read_fasta(fasta_file: Path) -> str:
 def get_fasta_length(fasta_file: Path) -> int:
     """
     Get the length of the FASTA file.
-    This function assumes that the FASTA file is well-formed and contains a single sequence.
+    This function assumes that the FASTA contains a single sequence.
     """
     return len(read_fasta(fasta_file))
 
@@ -135,6 +135,7 @@ def compute_position_error_rates(
 ) -> dict[int, dict[str, float]]:
     """
     Calculate position-wise error rates based on the number of errors and coverage.
+    Computes also the average quality scores for errors and all bases at each position.
     This function assumes that position_errors and position_coverage are defaultdicts
     where keys are positions and values are counts of errors or coverage.
     """
@@ -164,7 +165,6 @@ def process_mapping(
 ) -> Tuple[dict[int, Counter], dict[int, Counter]]:
     """
     Process the output of the bowtie2 mapping.
-    If keep is True, the SAM file will be read; otherwise, the process output will be read.
     """
     SNV_dict = defaultdict(Counter)
     insertion_dict = defaultdict(Counter)
@@ -310,7 +310,6 @@ def setup_logging(loglevel: str = "INFO"):
 def process_stderr_log(stderr_output: IO[str], outdir: Path):
     """
     Process the stderr output of the mapping process.
-    This function can be extended to handle specific error messages or warnings.
     """
     nb_reads = 0
     perc_reads = "0%"
