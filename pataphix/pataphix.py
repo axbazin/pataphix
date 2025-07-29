@@ -130,6 +130,8 @@ def map_reads(
 def compute_position_error_rates(
     position_errors: defaultdict[int, int],
     position_coverage: defaultdict[int, int],
+    qc_errors: defaultdict[int, int],
+    qc_coverage: defaultdict[int, int],
 ) -> dict[int, dict[str, float]]:
     """
     Calculate position-wise error rates based on the number of errors and coverage.
@@ -145,12 +147,13 @@ def compute_position_error_rates(
     max_position: int = max(position_coverage.keys()) if position_coverage else 0
 
     for pos in range(max_position + 1):
-        # R1 error rates
         if position_coverage[pos] > 0:
-            r1_error_rate = position_errors[pos] / position_coverage[pos]
+            error_rate = position_errors[pos] / position_coverage[pos]
             position_error_rates[pos] = {
-                "error_rate": r1_error_rate,
+                "error_rate": error_rate,
                 "errors": position_errors[pos],
+                "avg_qc_errors": qc_errors[pos] / position_errors[pos],
+                "avg_qc": qc_coverage[pos] / position_coverage[pos],
                 "reads": position_coverage[pos],
             }
     return position_error_rates
@@ -177,7 +180,7 @@ def process_mapping(
 
         # Get aligned pairs: (query_pos, ref_pos, ref_base)
         aligned_pairs = read.get_aligned_pairs()
-        for i, (query_pos, ref_pos) in enumerate(aligned_pairs):
+        for query_pos, ref_pos in aligned_pairs:
             if query_pos is not None and ref_pos is not None:
                 SNV_dict[ref_pos][
                     read.query_sequence[query_pos].upper()
@@ -311,8 +314,7 @@ def process_stderr_log(stderr_output: IO[str], outdir: Path):
     """
     nb_reads = 0
     perc_reads = "0%"
-    all_log = stderr_output.read()
-    for line in all_log.splitlines():
+    for line in stderr_output.splitlines():
         if "overall alignment rate" in line:
             perc_reads = line.split()[0].strip()
             logging.info(f"Overall alignment rate: {perc_reads}")
@@ -323,7 +325,7 @@ def process_stderr_log(stderr_output: IO[str], outdir: Path):
     logging.info(f"Number of reads (or pairs of reads) aligned to PhiX: {nb_reads}")
     # write the stderr output to a file
     outdir.mkdir(parents=True, exist_ok=True)
-    open(outdir / "mapping_stderr.log", "w").write(all_log)
+    open(outdir / "mapping_stderr.log", "w").write(stderr_output)
     fout = open(outdir / "phix.tsv", "w")
     fout.write("phix_reads\tperc_reads\n")
     fout.write(f"{nb_reads}\t{perc_reads}\n")
@@ -343,21 +345,23 @@ def write_results(results: dict, outdir: Path):
                 logging.debug(f"{key}: {value}")
     logging.info(f"Resulting metrics written to {outdir / 'phix_metrics.tsv'}")
     with open(outdir / "phix_error_estimates.tsv", "w") as fout:
-        fout.write("read\tposition\terror_rate\terrors\tcoverage\n")
+        fout.write(
+            "read\tposition\terror_rate\terrors\tavg_qc_errors\tavg_qc\tcoverage\n"
+        )
         for pos, metrics in results.get("R1_position_error_rates", {}).items():
             fout.write(
-                f"R1\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['reads']}\n"
+                f"R1\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']}\t{metrics['avg_qc']}\t{metrics['reads']}\n"
             )
             logging.debug(
-                f"R1\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['reads']}"
+                f"R1\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']}\t{metrics['avg_qc']}\t{metrics['reads']}"
             )
         if "R2_position_error_rates" in results:
             for pos, metrics in results["R2_position_error_rates"].items():
                 fout.write(
-                    f"R2\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['reads']}\n"
+                    f"R2\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']}\t{metrics['avg_qc']}\t{metrics['reads']}\n"
                 )
                 logging.debug(
-                    f"R2\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['reads']}"
+                    f"R2\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']}\t{metrics['avg_qc']}\t{metrics['reads']}"
                 )
     logging.info(f"Error estimates written to {outdir / 'phix_error_estimates.tsv'}")
 
@@ -403,44 +407,138 @@ def compute_error_rates(
     alignment_file: str,
     consensus: list,
     insertion: dict,
+    skip: int = 10,
 ) -> dict:
     """
     Compute the error rates based on the alignment file and the consensus sequence.
     This function calculates the position-wise error rates for both R1 and R2 reads.
     """
-    position_errors = defaultdict(int)
-    position_coverage = defaultdict(int)
+    position_errors = {"R1": defaultdict(int), "R2": defaultdict(int)}
+    qc_errors = {"R1": defaultdict(int), "R2": defaultdict(int)}
+    position_coverage = {"R1": defaultdict(int), "R2": defaultdict(int)}
+    qc_coverage = {"R1": defaultdict(int), "R2": defaultdict(int)}
+
+    nb_reads = 0
+    nb_single_reads = 0
+    nb_paired_reads = 0
+    nb_mismatches = 0
+    nb_indels = 0
+
+    ref_length = get_fasta_length(REFERENCE_FASTA)
 
     instream = pysam.AlignmentFile(alignment_file, "r")
     for read in instream:
+        nb_reads += 1
+        if read.is_paired:
+            nb_paired_reads += 1
+        else:
+            nb_single_reads += 1
+        read_type = "R1" if read.is_read1 else "R2"
+        init_insertion = False
+        insertion_sequence = ""
+        prev_ref_pos = None  # To track the previous reference position for insertions
+        prev_query_pos = None  # To track the previous query position for insertions
+        # do stuff with the reads
         if read.is_unmapped or read.is_secondary or read.is_supplementary:
             continue
 
         aligned_pairs = read.get_aligned_pairs()
         for query_pos, ref_pos in aligned_pairs:
-            if ref_pos is not None:
-                position_coverage[query_pos] += 1
+            if ref_pos is not None and ref_pos > skip and ref_pos < ref_length - skip:
+                # Only consider positions within the reference length and after skipping 'skip' bases
                 if query_pos is not None:
+                    position_coverage[read_type][query_pos] += 1
+                    qc_coverage[read_type][query_pos] += read.query_qualities[query_pos]
                     if read.query_sequence[query_pos] != consensus[ref_pos]:
-                        position_errors[query_pos] += 1
-            else:
-                # this is an insertion in the query sequence
-                position_coverage[query_pos] += 1
-                if read.query_sequence[query_pos] != "-":
-                    position_errors[query_pos] += 1
+                        position_errors[read_type][query_pos] += 1
+                        qc_errors[read_type][query_pos] += read.query_qualities[
+                            query_pos
+                        ]
+                        nb_mismatches += 1
+                else:
+                    # there is a deletion in the query sequence
+                    # counting the error in the previous position
+                    position_coverage[read_type][prev_query_pos] += 1
+                    position_errors[read_type][prev_query_pos] += 1
+                    nb_indels += 1
+                    qc_coverage[read_type][prev_query_pos] += read.query_qualities[
+                        prev_query_pos
+                    ]
+                    qc_errors[read_type][prev_query_pos] += read.query_qualities[
+                        prev_query_pos
+                    ]
+            elif query_pos is not None and ref_pos is None:
+                # find the previous ref_pos
+                # This is an insertion in the query sequence
+                if init_insertion:
+                    insertion_sequence += read.query_sequence[query_pos]
+                else:
+                    init_insertion = True
+                    insertion_sequence = read.query_sequence[query_pos]
+
+            if ref_pos is not None:
+                if (
+                    insertion_sequence != ""
+                    and ref_pos > skip
+                    and ref_pos < ref_length - skip
+                ):
+                    # if there is an insertion sequence and we are still in the reference range
+                    # then we need to check if the insertion sequence is already in the insertion dict
+                    if (not prev_ref_pos in insertion) or (
+                        prev_ref_pos in insertion
+                        and not insertion_sequence in insertion[prev_ref_pos]
+                    ):
+                        # then the whole insertion sequence is an error
+                        for i in range(prev_query_pos, query_pos):
+                            position_errors[read_type][i] += 1
+                            nb_indels += 1
+                            qc_errors[read_type][i] += read.query_qualities[i]
+                    for i in range(prev_query_pos, query_pos):
+                        position_coverage[read_type][i] += 1
+                        qc_coverage[read_type][i] += read.query_qualities[i]
+
+                    init_insertion = False
+                    insertion_sequence = ""
+                prev_ref_pos = ref_pos
+                if query_pos is not None:
+                    prev_query_pos = query_pos
 
     instream.close()
 
     # Calculate position-wise error rates
-    position_error_rates = compute_position_error_rates(
-        position_errors, position_coverage
+    R1_position_error_rates = compute_position_error_rates(
+        position_errors["R1"],
+        position_coverage["R1"],
+        qc_errors["R1"],
+        qc_coverage["R1"],
     )
 
-    return {
-        "R1_position_error_rates": position_error_rates,
-        "consensus": consensus,
-        "insertion_consensus": insertion,
+    result_dict = {
+        "R1_position_error_rates": R1_position_error_rates,
+        "nb_reads": nb_reads,
+        "nb_single_reads": nb_single_reads,
+        "nb_paired_reads": nb_paired_reads / 2,  # since paired reads are counted twice
+        "nb_mismatches": nb_mismatches,
+        "nb_indels": nb_indels,
+        "nb_errors": nb_mismatches + nb_indels,
+        "nb_errors_R1": sum(
+            R1_position_error_rates[pos]["errors"] for pos in R1_position_error_rates
+        ),
     }
+
+    if "R2" in position_errors:
+        R2_position_error_rates = compute_position_error_rates(
+            position_errors["R2"],
+            position_coverage["R2"],
+            qc_errors["R2"],
+            qc_coverage["R2"],
+        )
+        result_dict["R2_position_error_rates"] = R2_position_error_rates
+        result_dict["nb_errors_R2"] = sum(
+            R2_position_error_rates[pos]["errors"] for pos in R2_position_error_rates
+        )
+
+    return result_dict
 
 
 def main():
@@ -472,8 +570,8 @@ def main():
     if mapping_results.stdout is None:
         raise Exception("Mapping process did not produce any output.")
     if not args.only_estimates:
-        logging.info("Sorting and indexing the mapping results...")
         if args.keep_alignments:
+            logging.info("Sorting and indexing the mapping results...")
             alignment_file = str(args.outdir / "mapped_phix_sorted.bam")
             pysam.sort(
                 "--write-index",
@@ -483,10 +581,10 @@ def main():
                 str(alignment_file),
                 str(sam_output),
             )
+            logging.info("Mapping results sorted and indexed.")
         else:
             alignment_file = sam_output
 
-        logging.info("Mapping results sorted and indexed.")
         logging.info("Processing the mapping results...")
         # Now deal with the mapping results
         SNV_dict, INS_dict = process_mapping(
@@ -499,7 +597,6 @@ def main():
         )
         logging.info("Consensus sequence generated.")
         logging.info("Calculating read position error rates...")
-        exit(1)
         results = compute_error_rates(
             alignment_file=alignment_file,
             consensus=consensus,
@@ -507,7 +604,7 @@ def main():
         )
         write_results(results, args.outdir)
         logging.info("Mapping results processed successfully.")
-    mapping_process.wait()
+
     # process the stderr output of the mapping process
     process_stderr_log(mapping_results.stderr, outdir=args.outdir)
     tmpdir.cleanup()
