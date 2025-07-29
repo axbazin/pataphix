@@ -349,18 +349,18 @@ def write_results(results: dict, outdir: Path):
         )
         for pos, metrics in results.get("R1_position_error_rates", {}).items():
             fout.write(
-                f"R1\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']:.6f}\t{metrics['avg_qc']:.6f}\t{metrics['reads']}\n"
+                f"R1\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']:.6f}\t{metrics['avg_qc']:.6f}\t{metrics['position_coverage']}\n"
             )
             logging.debug(
-                f"R1\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']:.6f}\t{metrics['avg_qc']:.6f}\t{metrics['reads']}"
+                f"R1\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']:.6f}\t{metrics['avg_qc']:.6f}\t{metrics['position_coverage']}"
             )
         if "R2_position_error_rates" in results:
             for pos, metrics in results["R2_position_error_rates"].items():
                 fout.write(
-                    f"R2\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']:.6f}\t{metrics['avg_qc']:.6f}\t{metrics['reads']}\n"
+                    f"R2\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']:.6f}\t{metrics['avg_qc']:.6f}\t{metrics['position_coverage']}\n"
                 )
                 logging.debug(
-                    f"R2\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']:.6f}\t{metrics['avg_qc']:.6f}\t{metrics['reads']}"
+                    f"R2\t{pos}\t{metrics['error_rate']:.6f}\t{metrics['errors']}\t{metrics['avg_qc_errors']:.6f}\t{metrics['avg_qc']:.6f}\t{metrics['position_coverage']}"
                 )
     logging.info(f"Error estimates written to {outdir / 'phix_error_estimates.tsv'}")
 
