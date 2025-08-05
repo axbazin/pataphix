@@ -1,10 +1,12 @@
 # pataphix
 
-pataphix is a command line tool to process and filter PhiX sequences in fastq files and obtain QC metrics from them using bowtie2 for mapping. Those sequences are rarely used and often thrown away at the very beginning of analysis workflows, but sometimes you can have them bundled with your sample sequences. This tool helps to filter them out, and computes some QC metrics from them.
+pataphix is a command line tool to process and filter PhiX sequences in fastq files and obtain QC metrics from them using bowtie2 with more lenient parameters for mapping.
 
-You can choose to write new fastq files without the PhiX sequences, as well as keep the alignment results. 
+Those sequences are rarely used and often thrown away at the very beginning of analysis workflows, but sometimes you can have them bundled with your sample sequences. This tool can help to filter them out, and computes some QC metrics from them.
 
-The metrics computed will be based on the PhiX alignment to its reference. Any difference, whether mismatch or indel, will be considered as an error. The number and rate of errors will be computer globally, and for each read position, in order to identify if there are specific parts of the reads that are more erroneous.
+You can choose to write new fastq files without the PhiX sequences, as well as keep the alignment results if you wish to process them in other ways.
+
+The metrics computed will be based on the PhiX alignment to its reference. Mismatches and indels that are supported by a majority of reads will be considered 'real' changes, and the consensus sequence will be updated to not consider them as an error. Any difference, whether mismatch or indel, that are not majoritary will be considered as an error. The number and rate of errors will be computed both globally and for each read position, in order to identify if there are specific parts of the reads that are more erroneous, e.g. in complex designs using barcodes or UMI for example.
 
 # Basic usage
 

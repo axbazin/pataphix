@@ -100,9 +100,24 @@ def map_reads(
                 os.path.basename(R1).split("_R1_")[0] + "_phix_filtered.fastq.gz"
             )
         bowtie2_cmd.extend([filter_option, str(outdir / filter_path)])
+    # changed default bowtie2 parameters to better fit reads of low length
+    # maybe should be called only if the reads are short?
     bowtie2_cmd.extend(
         [
-            "--end-to-end",
+            "-D",
+            "10",
+            "-R",
+            "1",
+            "-N",
+            "0",
+            "-i",
+            "S,1,1.15",
+            "-L",
+            "10",
+            "--rdg",
+            "3,1",
+            "--rfg",
+            "3,1",
             "--threads",
             str(threads),
             "-x",
@@ -118,12 +133,16 @@ def map_reads(
     bowtie2_cmd.extend(["-S", sam_output])
 
     logging.debug(f"Launching: {' '.join(bowtie2_cmd)}")
-    mapping_process = subprocess.run(
-        bowtie2_cmd,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        mapping_process = subprocess.run(
+            bowtie2_cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error running bowtie2: {e.stderr.strip()}")
+        raise e
     return mapping_process
 
 
@@ -284,6 +303,7 @@ def cmd_line():
         version=f"%(prog)s {distribution('pataphix').version}",
         help="Show the version of pataphix.",
     )
+
     return parser.parse_args()
 
 
@@ -543,6 +563,10 @@ def compute_error_rates(
 
 def main():
     args = cmd_line()
+    if not args.R1.exists():
+        raise FileNotFoundError(f"R1 file not found: {args.R1}")
+    if args.R2 and not args.R2.exists():
+        raise FileNotFoundError(f"R2 file not found: {args.R2}")
     tmpdir = TemporaryDirectory(dir=args.tmpdir)
     setup_logging(args.loglevel)
     is_bowtie2_installed()
