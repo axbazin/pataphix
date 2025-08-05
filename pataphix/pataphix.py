@@ -509,11 +509,11 @@ def compute_error_rates(
                         and not insertion_sequence in insertion[prev_ref_pos]
                     ):
                         # then the whole insertion sequence is an error
-                        for i in range(prev_query_pos, query_pos):
+                        for i in range(prev_query_pos_with_ref, prev_query_pos + 1):
                             position_errors[read_type][i] += 1
                             nb_indels += 1
                             qc_errors[read_type][i] += read.query_qualities[i]
-                    for i in range(prev_query_pos, query_pos):
+                    for i in range(prev_query_pos_with_ref, prev_query_pos + 1):
                         position_coverage[read_type][i] += 1
                         qc_coverage[read_type][i] += read.query_qualities[i]
 
@@ -521,7 +521,9 @@ def compute_error_rates(
                     insertion_sequence = ""
                 prev_ref_pos = ref_pos
                 if query_pos is not None:
-                    prev_query_pos = query_pos
+                    prev_query_pos_with_ref = query_pos
+            if query_pos is not None:
+                prev_query_pos = query_pos
 
     instream.close()
 
