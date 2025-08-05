@@ -8,6 +8,25 @@ You can choose to write new fastq files without the PhiX sequences, as well as k
 
 The metrics computed will be based on the PhiX alignment to its reference. Mismatches and indels that are supported by a majority of reads will be considered 'real' changes, and the consensus sequence will be updated to not consider them as an error. Any difference, whether mismatch or indel, that are not majoritary will be considered as an error. The number and rate of errors will be computed both globally and for each read position, in order to identify if there are specific parts of the reads that are more erroneous, e.g. in complex designs using barcodes or UMI for example.
 
+# How to install
+
+Its only dependency is pysam.
+
+The simplest way to install is to clone the repository, then run pip or poetry.
+
+*Using pip*:
+```bash
+git clone https://github.com/axbazin/pataphix
+pip install pataphix
+```
+
+*Using poetry*:
+```bash
+git clone https://github.com/axbazin/pataphix
+cd pataphix
+poetry install
+```
+
 # Basic usage
 
 ```bash
