@@ -14,13 +14,13 @@ Its only dependency is pysam.
 
 The simplest way to install is to clone the repository, then run pip or poetry.
 
-*Using pip*:
+**Using pip**:
 ```bash
 git clone https://github.com/axbazin/pataphix
 pip install pataphix
 ```
 
-*Using poetry*:
+**Using poetry**:
 ```bash
 git clone https://github.com/axbazin/pataphix
 cd pataphix
