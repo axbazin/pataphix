@@ -3,7 +3,7 @@ name = "pataphix"
 version = "0.1.0"
 description = ""
 authors = [
-    {name = "Adelme Bazin",email = "adelme.bazin@ens-lyon.fr"}
+    {name = "Adelme Bazin"}
 ]
 readme = "README.md"
 requires-python = ">=3.11"
